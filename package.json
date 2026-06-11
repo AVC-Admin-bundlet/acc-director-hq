@@ -8,19 +8,16 @@ const {
   NS_TOKEN_SECRET,
 } = process.env;
 
-// ─── OAUTH 1.0a ───────────────────────────────────────────────
 function percentEncode(str) {
   return encodeURIComponent(String(str)).replace(/[!'()*]/g, (c) =>
     '%' + c.charCodeAt(0).toString(16).toUpperCase()
   );
 }
 
-// queryParams = URL query string params that must be included in signature
 function generateOAuthHeader(method, baseUrl, queryParams = {}) {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const nonce = crypto.randomBytes(16).toString('hex');
 
-  // All params: OAuth params + URL query params combined for signing
   const allParams = {
     oauth_consumer_key: NS_CONSUMER_KEY,
     oauth_nonce: nonce,
@@ -49,7 +46,6 @@ function generateOAuthHeader(method, baseUrl, queryParams = {}) {
     .update(baseString)
     .digest('base64');
 
-  // OAuth header only includes OAuth params (not URL query params)
   return (
     `OAuth realm="${NS_ACCOUNT_ID}",` +
     ` oauth_consumer_key="${NS_CONSUMER_KEY}",` +
@@ -62,12 +58,10 @@ function generateOAuthHeader(method, baseUrl, queryParams = {}) {
   );
 }
 
-// ─── SUITEQL RUNNER ───────────────────────────────────────────
 async function suiteQL(sql, limit = 50, offset = 0) {
   const baseUrl = `https://${NS_ACCOUNT_ID}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql`;
   const requestUrl = `${baseUrl}?limit=${limit}&offset=${offset}`;
 
-  // Pass limit/offset so they're included in the OAuth signature
   const auth = generateOAuthHeader('POST', baseUrl, {
     limit: String(limit),
     offset: String(offset),
@@ -88,7 +82,6 @@ async function suiteQL(sql, limit = 50, offset = 0) {
   return JSON.parse(text);
 }
 
-// ─── QUERIES ─────────────────────────────────────────────────
 const Q_OPPORTUNITIES = `
   SELECT o.id, o.title, o.expectedCloseDate, o.probability, o.projectedTotal, o.status
   FROM opportunity o
@@ -110,7 +103,6 @@ const Q_PROJECTS = `
   ORDER BY j.startDate DESC
 `;
 
-// ─── HANDLER ─────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -123,28 +115,23 @@ export default async function handler(req, res) {
       const data = await suiteQL(Q_OPPORTUNITIES, 50);
       return res.status(200).json(data);
     }
-
     if (type === 'projects') {
       const data = await suiteQL(Q_PROJECTS, 50);
       return res.status(200).json(data);
     }
-
     if (type === 'tasks') {
       const data = await suiteQL(Q_TASKS, 50);
       return res.status(200).json(data);
     }
-
     if (type === 'summary') {
       const [opps, proj, tasks] = await Promise.all([
         suiteQL(`SELECT COUNT(id) AS cnt, SUM(projectedTotal) AS total FROM opportunity WHERE status IN ('A', 'B')`, 1),
         suiteQL(`SELECT COUNT(id) AS cnt FROM job WHERE isInactive = 'F'`, 1),
         suiteQL(`SELECT COUNT(id) AS cnt FROM projectTask WHERE isInactive = 'F' AND status != 'COMPLETE'`, 1),
       ]);
-
       const oppRow = opps.items?.[0] || {};
       const projRow = proj.items?.[0] || {};
       const taskRow = tasks.items?.[0] || {};
-
       return res.status(200).json({
         open_opps: oppRow.cnt ?? 0,
         pipeline_value: oppRow.total ?? 0,
@@ -152,9 +139,7 @@ export default async function handler(req, res) {
         open_tasks: taskRow.cnt ?? 0,
       });
     }
-
     return res.status(400).json({ error: `Unknown type: ${type}` });
-
   } catch (err) {
     console.error('[NS Error]', err.message);
     return res.status(500).json({ error: err.message });
