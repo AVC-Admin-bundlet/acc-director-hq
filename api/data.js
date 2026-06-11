@@ -1,1 +1,155 @@
-
+import crypto from 'crypto';
+ 
+const {
+  NS_ACCOUNT_ID,
+  NS_CONSUMER_KEY,
+  NS_CONSUMER_SECRET,
+  NS_TOKEN_ID,
+  NS_TOKEN_SECRET,
+} = process.env;
+ 
+// ─── OAUTH 1.0a ───────────────────────────────────────────────
+function percentEncode(str) {
+  return encodeURIComponent(String(str)).replace(/[!'()*]/g, (c) =>
+    '%' + c.charCodeAt(0).toString(16).toUpperCase()
+  );
+}
+ 
+function generateOAuthHeader(method, url) {
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = crypto.randomBytes(16).toString('hex');
+ 
+  const params = {
+    oauth_consumer_key: NS_CONSUMER_KEY,
+    oauth_nonce: nonce,
+    oauth_signature_method: 'HMAC-SHA256',
+    oauth_timestamp: timestamp,
+    oauth_token: NS_TOKEN_ID,
+    oauth_version: '1.0',
+  };
+ 
+  const paramString = Object.keys(params)
+    .sort()
+    .map((k) => `${percentEncode(k)}=${percentEncode(params[k])}`)
+    .join('&');
+ 
+  const baseString = [
+    method.toUpperCase(),
+    percentEncode(url),
+    percentEncode(paramString),
+  ].join('&');
+ 
+  const signingKey = `${percentEncode(NS_CONSUMER_SECRET)}&${percentEncode(NS_TOKEN_SECRET)}`;
+ 
+  const signature = crypto
+    .createHmac('sha256', signingKey)
+    .update(baseString)
+    .digest('base64');
+ 
+  const realm = NS_ACCOUNT_ID.replace(/-/g, '_').toUpperCase();
+ 
+  return (
+    `OAuth realm="${realm}",` +
+    ` oauth_consumer_key="${NS_CONSUMER_KEY}",` +
+    ` oauth_token="${NS_TOKEN_ID}",` +
+    ` oauth_signature_method="HMAC-SHA256",` +
+    ` oauth_timestamp="${timestamp}",` +
+    ` oauth_nonce="${nonce}",` +
+    ` oauth_version="1.0",` +
+    ` oauth_signature="${signature}"`
+  );
+}
+ 
+// ─── SUITEQL RUNNER ───────────────────────────────────────────
+async function suiteQL(sql, limit = 50, offset = 0) {
+  const baseUrl = `https://${NS_ACCOUNT_ID}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql`;
+  const url = `${baseUrl}?limit=${limit}&offset=${offset}`;
+  const auth = generateOAuthHeader('POST', baseUrl);
+ 
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: auth,
+      'Content-Type': 'application/json',
+      prefer: 'transient',
+    },
+    body: JSON.stringify({ q: sql }),
+  });
+ 
+  const text = await res.text();
+  if (!res.ok) throw new Error(`NS ${res.status}: ${text}`);
+  return JSON.parse(text);
+}
+ 
+// ─── QUERIES ─────────────────────────────────────────────────
+const Q_OPPORTUNITIES = `
+  SELECT o.id, o.title, o.expectedCloseDate, o.probability, o.projectedTotal, o.status
+  FROM opportunity o
+  WHERE o.status IN ('A', 'B')
+  ORDER BY o.expectedCloseDate ASC
+`;
+ 
+const Q_TASKS = `
+  SELECT pt.id, pt.title, pt.status, pt.endDate, pt.percentTimeComplete
+  FROM projectTask pt
+  WHERE pt.isInactive = 'F' AND pt.status != 'COMPLETE'
+  ORDER BY pt.endDate ASC
+`;
+ 
+const Q_PROJECTS = `
+  SELECT j.id, j.companyName, j.entityStatus, j.startDate, j.projectedEndDate, j.percentTimeComplete
+  FROM job j
+  WHERE j.isInactive = 'F'
+  ORDER BY j.startDate DESC
+`;
+ 
+// ─── HANDLER ─────────────────────────────────────────────────
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+ 
+  const { type } = req.query;
+ 
+  try {
+    if (type === 'opportunities') {
+      const data = await suiteQL(Q_OPPORTUNITIES, 50);
+      return res.status(200).json(data);
+    }
+ 
+    if (type === 'projects') {
+      const data = await suiteQL(Q_PROJECTS, 50);
+      return res.status(200).json(data);
+    }
+ 
+    if (type === 'tasks') {
+      const data = await suiteQL(Q_TASKS, 50);
+      return res.status(200).json(data);
+    }
+ 
+    if (type === 'summary') {
+      const [opps, proj, tasks] = await Promise.all([
+        suiteQL(`SELECT COUNT(id) AS cnt, SUM(projectedTotal) AS total FROM opportunity WHERE status IN ('A', 'B')`, 1),
+        suiteQL(`SELECT COUNT(id) AS cnt FROM job WHERE isInactive = 'F'`, 1),
+        suiteQL(`SELECT COUNT(id) AS cnt FROM projectTask WHERE isInactive = 'F' AND status != 'COMPLETE'`, 1),
+      ]);
+ 
+      const oppRow = opps.items?.[0] || {};
+      const projRow = proj.items?.[0] || {};
+      const taskRow = tasks.items?.[0] || {};
+ 
+      return res.status(200).json({
+        open_opps: oppRow.cnt ?? 0,
+        pipeline_value: oppRow.total ?? 0,
+        active_projects: projRow.cnt ?? 0,
+        open_tasks: taskRow.cnt ?? 0,
+      });
+    }
+ 
+    return res.status(400).json({ error: `Unknown type: ${type}` });
+ 
+  } catch (err) {
+    console.error('[NS Error]', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+}
